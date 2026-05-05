@@ -1,6 +1,6 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { APIProvider, Map, AdvancedMarker, useMap, useMapsLibrary, Pin } from '@vis.gl/react-google-maps';
-import { Building2, MapPin, Coffee, Utensils, ShoppingBag, AlertTriangle, Star } from 'lucide-react';
+import { Building2, MapPin, Coffee, Utensils, ShoppingBag, AlertTriangle, Star, Navigation } from 'lucide-react';
 import { DUMMY_PROPERTIES, type PropertyListing } from './data';
 
 // Read the API Key from Vite's environment variables
@@ -14,57 +14,119 @@ const getAmenityIcon = (type: string) => {
   return <MapPin size={18} />;
 };
 
-// Inner component that handles the map logic
 const MapContent: React.FC<{
   selectedProperty: PropertyListing | null;
   onPropertySelect: (prop: PropertyListing) => void;
-  setAmenities: (amenities: google.maps.places.PlaceResult[]) => void;
+  amenities: any[];
+  setAmenities: (amenities: any[]) => void;
+  selectedAmenity: any | null;
+  setSelectedAmenity: (amenity: any | null) => void;
   setIsLoading: (loading: boolean) => void;
-}> = ({ selectedProperty, onPropertySelect, setAmenities, setIsLoading }) => {
+  setRouteInfo: (info: { distance: string; duration: string } | null) => void;
+}> = ({ selectedProperty, onPropertySelect, amenities, setAmenities, selectedAmenity, setSelectedAmenity, setIsLoading, setRouteInfo }) => {
   const map = useMap();
   const placesLib = useMapsLibrary('places');
+  const routesLib = useMapsLibrary('routes');
 
-  const fetchNearbyAmenities = useCallback((location: google.maps.LatLngLiteral) => {
+  const directionsRendererRef = useRef<google.maps.DirectionsRenderer | null>(null);
+
+  // Initialize DirectionsRenderer once
+  useEffect(() => {
+    if (map && routesLib && !directionsRendererRef.current) {
+      directionsRendererRef.current = new routesLib.DirectionsRenderer({
+        map,
+        suppressMarkers: true, // We draw our own markers
+        polylineOptions: {
+          strokeColor: '#818cf8',
+          strokeWeight: 5,
+        }
+      });
+    }
+  }, [map, routesLib]);
+
+  const fetchNearbyAmenities = useCallback(async (location: google.maps.LatLngLiteral) => {
     if (!placesLib || !map) return;
-    
-    setIsLoading(true);
-    
-    const service = new placesLib.PlacesService(map);
-    const request = {
-      location,
-      radius: 1000, // 1km radius
-      type: 'restaurant' // default type, could be expanded
-    };
 
-    service.nearbySearch(request, (results, status) => {
-      if (status === placesLib.PlacesServiceStatus.OK && results) {
-        setAmenities(results.slice(0, 10)); // limit to top 10 for POC
-      } else {
-        setAmenities([]);
-      }
-      setIsLoading(false);
-    });
+    setIsLoading(true);
+    try {
+      // Use the New Places API class
+      const { Place } = await google.maps.importLibrary("places") as google.maps.PlacesLibrary;
+
+      const request = {
+        fields: ['id', 'displayName', 'location', 'formattedAddress', 'primaryType', 'rating', 'userRatingCount'],
+        locationRestriction: {
+          center: location,
+          radius: 1000,
+        },
+        includedPrimaryTypes: ['restaurant', 'cafe', 'park', 'supermarket', 'school', 'hospital', 'gym', 'bakery'],
+        maxResultCount: 15,
+      };
+
+      const { places } = await Place.searchNearby(request);
+      setAmenities(places || []);
+    } catch (error) {
+      console.error("New Places API Search failed:", error);
+      setAmenities([]);
+    }
+    setIsLoading(false);
   }, [placesLib, map, setAmenities, setIsLoading]);
 
+  const calculateRoute = useCallback((property: PropertyListing, amenity: any) => {
+    if (!routesLib || !directionsRendererRef.current) return;
+
+    const directionsService = new routesLib.DirectionsService();
+
+    // Amenity location might be a function or object depending on the API result
+    const destinationLocation = amenity.location;
+
+    directionsService.route({
+      origin: { lat: property.lat, lng: property.lng },
+      destination: destinationLocation,
+      travelMode: google.maps.TravelMode.WALKING,
+    }, (result, status) => {
+      if (status === google.maps.DirectionsStatus.OK && result) {
+        directionsRendererRef.current?.setDirections(result);
+        const leg = result.routes[0].legs[0];
+        setRouteInfo({
+          distance: leg.distance?.text || '',
+          duration: leg.duration?.text || ''
+        });
+      } else {
+        console.error("Directions request failed due to " + status);
+        setRouteInfo(null);
+      }
+    });
+  }, [routesLib, setRouteInfo]);
+
+  // When property changes, fetch new amenities and clear route
   useEffect(() => {
     if (selectedProperty && map) {
       const location = { lat: selectedProperty.lat, lng: selectedProperty.lng };
       map.panTo(location);
       map.setZoom(15);
       fetchNearbyAmenities(location);
-    } else {
-      setAmenities([]);
+
+      setSelectedAmenity(null);
+      setRouteInfo(null);
+      directionsRendererRef.current?.setDirections({ routes: [] }); // clear route
     }
-  }, [selectedProperty, map, fetchNearbyAmenities]);
+  }, [selectedProperty, map, fetchNearbyAmenities, setSelectedAmenity, setRouteInfo]);
+
+  // When amenity changes, calculate route
+  useEffect(() => {
+    if (selectedProperty && selectedAmenity) {
+      calculateRoute(selectedProperty, selectedAmenity);
+    }
+  }, [selectedProperty, selectedAmenity, calculateRoute]);
 
   return (
     <Map
-      defaultCenter={{ lat: 40.7128, lng: -74.0060 }}
+      defaultCenter={{ lat: 47.3769, lng: 8.5417 }} // Default Zurich
       defaultZoom={12}
       mapId="DEMO_MAP_ID" // Requires a Map ID in GCP for AdvancedMarkers
       disableDefaultUI={true}
     >
-      {/* Render Dummy Properties */}
+      {/* Property Markers */}
       {DUMMY_PROPERTIES.map((prop) => (
         <AdvancedMarker
           key={prop.id}
@@ -79,13 +141,35 @@ const MapContent: React.FC<{
           />
         </AdvancedMarker>
       ))}
+
+      {/* Amenity Markers */}
+      {amenities.map((place) => {
+        // location from Place object might be LatLng object, use as is
+        if (!place.location) return null;
+        const isSelected = selectedAmenity?.id === place.id;
+
+        return (
+          <AdvancedMarker
+            key={place.id}
+            position={place.location}
+            onClick={() => setSelectedAmenity(place)}
+            zIndex={isSelected ? 50 : 10}
+          >
+            <div className={`amenity-marker ${isSelected ? 'active' : ''}`}>
+              {isSelected ? <Navigation size={12} /> : ''}
+            </div>
+          </AdvancedMarker>
+        );
+      })}
     </Map>
   );
 };
 
 export default function App() {
   const [selectedProperty, setSelectedProperty] = useState<PropertyListing | null>(null);
-  const [amenities, setAmenities] = useState<google.maps.places.PlaceResult[]>([]);
+  const [amenities, setAmenities] = useState<any[]>([]);
+  const [selectedAmenity, setSelectedAmenity] = useState<any | null>(null);
+  const [routeInfo, setRouteInfo] = useState<{ distance: string, duration: string } | null>(null);
   const [isLoading, setIsLoading] = useState(false);
 
   return (
@@ -94,18 +178,18 @@ export default function App() {
       <div className="sidebar">
         <div className="sidebar-header">
           <h1>Property Listings</h1>
-          <p>Select a property to explore nearby amenities</p>
+          <p>Select a property and amenity to see the route</p>
         </div>
 
         <div className="list-container">
           <div className="section-title">
             <Building2 size={16} />
-            Our Properties
+            Our Properties (EU)
           </div>
-          
+
           {DUMMY_PROPERTIES.map((prop) => (
-            <div 
-              key={prop.id} 
+            <div
+              key={prop.id}
               className={`card ${selectedProperty?.id === prop.id ? 'active' : ''}`}
               onClick={() => setSelectedProperty(prop)}
             >
@@ -125,30 +209,48 @@ export default function App() {
                 <Coffee size={16} />
                 Nearby Amenities (1km)
               </div>
-              
+
               {isLoading ? (
                 <div className="loader"></div>
               ) : amenities.length > 0 ? (
-                amenities.map((place, index) => (
-                  <div key={place.place_id || index} className="amenity-card">
-                    <div className="amenity-icon">
-                      {getAmenityIcon(place.types?.[0] || '')}
+                amenities.map((place) => {
+                  const isSelected = selectedAmenity?.id === place.id;
+
+                  return (
+                    <div
+                      key={place.id}
+                      className={`amenity-card ${isSelected ? 'selected' : ''}`}
+                      onClick={() => setSelectedAmenity(place)}
+                      style={{ cursor: 'pointer' }}
+                    >
+                      <div className="amenity-icon">
+                        {getAmenityIcon(place.primaryType || '')}
+                      </div>
+                      <div className="amenity-info" style={{ flex: 1 }}>
+                        <h4>{place.displayName || place.name || 'Unknown Place'}</h4>
+                        <p>{place.formattedAddress}</p>
+                        {place.rating && (
+                          <div className="rating">
+                            <Star size={14} fill="#fbbf24" stroke="#fbbf24" />
+                            {place.rating} ({place.userRatingCount})
+                          </div>
+                        )}
+
+                        {/* Route Info injected here when selected */}
+                        {isSelected && routeInfo && (
+                          <div className="route-info">
+                            <Navigation size={14} color="#818cf8" />
+                            <span style={{ color: '#818cf8', fontWeight: 600 }}>{routeInfo.distance}</span>
+                            <span style={{ color: 'var(--text-muted)' }}> (Walk: {routeInfo.duration})</span>
+                          </div>
+                        )}
+                      </div>
                     </div>
-                    <div className="amenity-info">
-                      <h4>{place.name}</h4>
-                      <p>{place.vicinity}</p>
-                      {place.rating && (
-                        <div className="rating">
-                          <Star size={14} fill="#fbbf24" stroke="#fbbf24" />
-                          {place.rating} ({place.user_ratings_total})
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                ))
+                  );
+                })
               ) : (
                 <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem', textAlign: 'center', padding: '20px' }}>
-                  No amenities found. Ensure your API key is valid.
+                  No amenities found. Ensure your API key has "Places API (New)" enabled.
                 </p>
               )}
             </div>
@@ -164,19 +266,22 @@ export default function App() {
             <div>
               <div style={{ fontWeight: 'bold' }}>Missing API Key</div>
               <div style={{ fontSize: '0.85rem', opacity: 0.9 }}>
-                Please add your Google Maps API Key in App.tsx
+                Please create a .env file and add VITE_GOOGLE_MAPS_API_KEY
               </div>
             </div>
           </div>
         ) : null}
 
-        {/* APIProvider handles script loading */}
-        <APIProvider apiKey={GOOGLE_MAPS_API_KEY}>
-          <MapContent 
+        <APIProvider apiKey={GOOGLE_MAPS_API_KEY} version="beta">
+          <MapContent
             selectedProperty={selectedProperty}
             onPropertySelect={setSelectedProperty}
+            amenities={amenities}
             setAmenities={setAmenities}
+            selectedAmenity={selectedAmenity}
+            setSelectedAmenity={setSelectedAmenity}
             setIsLoading={setIsLoading}
+            setRouteInfo={setRouteInfo}
           />
         </APIProvider>
       </div>

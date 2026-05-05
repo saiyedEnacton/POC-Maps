@@ -263,3 +263,25 @@ body {
   0% { transform: rotate(0deg); }
   100% { transform: rotate(360deg); }
 }
+
+/* Routing UI Enhancements */
+.amenity-card.selected {
+  background: rgba(99, 102, 241, 0.2);
+  border-color: #818cf8;
+}
+
+.route-info {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  background: rgba(0, 0, 0, 0.2);
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 0.85rem;
+}
+
+.amenity-marker.active {
+  background: #f59e0b;
+  transform: scale(1.2);
+}
